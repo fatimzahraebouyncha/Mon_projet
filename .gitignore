@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Streamlit (secrets locaux à ne jamais pousser)
+.streamlit/secrets.toml
+
+# Systèmes
+.DS_Store
+Thumbs.db
+desktop.ini
