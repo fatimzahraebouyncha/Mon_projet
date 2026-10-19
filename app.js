@@ -5,9 +5,15 @@
 'use strict';
 
 const STORAGE_KEY = 'sika.app.v1';
-const APP_VERSION = '1.0.0';
+const AI_STORAGE_KEY = 'sika.ai.v1';
+const APP_VERSION = '1.1.0';
 const CURRENCY = 'FCFA';
-const VIEWS = ['overview', 'transactions', 'documents', 'scanner', 'report', 'financing', 'settings'];
+const VIEWS = ['overview', 'assistant', 'transactions', 'documents', 'scanner', 'report', 'financing', 'settings'];
+const DEFAULT_AI_MODEL = 'claude-haiku-5-5';
+const AI_MODELS_FALLBACK = [
+  { id: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' },
+  { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' }
+];
 const INCOME_CATEGORIES = ['Ventes', 'Vente en gros', 'Livraison', 'Autre revenu'];
 const EXPENSE_CATEGORIES = ['Achats', 'Loyer', 'Transport', 'Électricité', 'Salaire', 'Communication', 'Autres dépenses'];
 const ALL_CATEGORIES = [...INCOME_CATEGORIES, ...EXPENSE_CATEGORIES];
@@ -42,6 +48,16 @@ const scannerState = {
   token: 0,
   fallback: false,
   ocrText: ''
+};
+
+const agentState = {
+  analysis: '',
+  analysisAt: null,
+  report: '',
+  reportAt: null,
+  busy: '',
+  chat: [],
+  models: null
 };
 
 /* ---------- Petites fonctions utilitaires ---------- */
@@ -205,12 +221,47 @@ function createDefaultState() {
     },
     chartPeriod: '6m',
     reportPeriod: 'month',
-    loan: { amount: 1000000, months: 18 }
+    loan: { amount: 1000000, months: 18 },
+    debts: [],
+    receivables: [],
+    ai: { enabled: false, model: DEFAULT_AI_MODEL }
   };
 
   base.transactions = buildSeedTransactions();
   base.documents = buildSeedDocuments(base.transactions, base.profile);
+  base.debts = buildSeedDebts();
+  base.receivables = buildSeedReceivables();
   return base;
+}
+
+function buildSeedDueItem(prefix, index, data) {
+  return {
+    id: `${prefix}_demo_${index}`,
+    type: data.type,
+    party: data.party,
+    label: data.label,
+    amount: data.amount,
+    dueDate: toISODate(addDays(new Date(), data.offsetDays)),
+    note: data.note || '',
+    status: 'open',
+    createdAt: new Date().toISOString()
+  };
+}
+
+function buildSeedDebts() {
+  return [
+    buildSeedDueItem('debt', 1, { type: 'debt', party: 'Loyer boutique', label: 'Loyer du mois', amount: 60000, offsetDays: 3, note: 'À régler avant la fin de la semaine.' }),
+    buildSeedDueItem('debt', 2, { type: 'debt', party: 'Grossiste Adjamé', label: 'Solde des marchandises', amount: 145000, offsetDays: 9 }),
+    buildSeedDueItem('debt', 3, { type: 'debt', party: 'Fournisseur boissons', label: 'Facture boissons', amount: 82500, offsetDays: 21 })
+  ];
+}
+
+function buildSeedReceivables() {
+  return [
+    buildSeedDueItem('rec', 1, { type: 'receivable', party: 'Clientèle du marché', label: 'Ardoises de la semaine', amount: 21500, offsetDays: -4, note: 'Plusieurs petits montants à récupérer.' }),
+    buildSeedDueItem('rec', 2, { type: 'receivable', party: 'Restaurant Le Baobab', label: 'Commande livrée', amount: 38500, offsetDays: 5 }),
+    buildSeedDueItem('rec', 3, { type: 'receivable', party: 'Boutique Fatou', label: 'Vente de riz à crédit', amount: 48000, offsetDays: 14 })
+  ];
 }
 
 function buildSeedTransactions() {
@@ -557,6 +608,10 @@ function loadState() {
     parsed.chartPeriod = parsed.chartPeriod || '6m';
     parsed.reportPeriod = parsed.reportPeriod || 'month';
     parsed.loan = parsed.loan || { amount: 1000000, months: 18 };
+    parsed.debts = Array.isArray(parsed.debts) ? parsed.debts : buildSeedDebts();
+    parsed.receivables = Array.isArray(parsed.receivables) ? parsed.receivables : buildSeedReceivables();
+    parsed.ai = parsed.ai || { enabled: false, model: DEFAULT_AI_MODEL };
+    parsed.ai.model = parsed.ai.model || DEFAULT_AI_MODEL;
     return parsed;
   } catch (error) {
     console.warn('Données locales illisibles', error);
@@ -948,6 +1003,7 @@ function attachChartEvents(wrap, series) {
 /* ---------- Navigation et éléments communs ---------- */
 const PAGE_TITLES = {
   overview: 'Vue d’ensemble',
+  assistant: 'Assistant IA',
   transactions: 'Transactions',
   documents: 'Documents',
   scanner: 'Scanner un document',
@@ -991,6 +1047,7 @@ function switchView(view) {
 function renderCurrentPage() {
   const renderers = {
     overview: renderOverview,
+    assistant: renderAssistant,
     transactions: renderTransactions,
     documents: renderDocuments,
     scanner: renderScanner,
@@ -1074,6 +1131,16 @@ function renderNotificationList() {
   }
   const readiness = getReadiness();
   const latestDocs = state.documents.slice(0, 2);
+  const overdueItems = openDueItems().filter(item => item.overdue);
+  const dueNotice = overdueItems.length ? `
+      <button type="button" class="notification-item" data-view="assistant">
+        <span class="notification-item-icon warn">${icon('clock')}</span>
+        <span class="notification-item-copy">
+          <strong>${overdueItems.length} échéance${overdueItems.length > 1 ? 's' : ''} en retard</strong>
+          <p>${escapeHTML(overdueItems[0].party)} · ${formatAmount(sumTransactions(overdueItems))} — à relancer ou à régler.</p>
+        </span>
+        <span class="notification-item-time">Urgent</span>
+      </button>` : '';
   const items = latestDocs.map(doc => `
     <button type="button" class="notification-item" data-action="open-document" data-id="${escapeHTML(doc.id)}">
       <span class="notification-item-icon">${icon('file')}</span>
@@ -1086,6 +1153,7 @@ function renderNotificationList() {
   list.innerHTML = `
     <div class="notification-list">
       ${items}
+      ${dueNotice}
       <button type="button" class="notification-item" data-view="financing">
         <span class="notification-item-icon">${icon('bank')}</span>
         <span class="notification-item-copy">
@@ -1902,7 +1970,7 @@ function uploadIdleHTML() {
           <button type="button" class="btn btn-primary" data-action="trigger-scan-file">${icon('upload', 'icon-sm')} Choisir une photo</button>
           <button type="button" class="btn btn-secondary" data-action="trigger-scan-camera">${icon('camera', 'icon-sm')} Prendre une photo</button>
         </div>
-        <span class="dropzone-hint">JPG, PNG ou WebP · 12 Mo maximum · le texte doit rester lisible</span>
+        <span class="dropzone-hint">${aiEnabled() ? 'Assistant IA actif · la photo sera analysée par Claude pour une extraction fiable' : 'JPG, PNG ou WebP · 12 Mo maximum · le texte doit rester lisible'}</span>
         <input type="file" id="scanFileInput" accept="image/*" aria-label="Choisir une photo de reçu">
         <input type="file" id="scanCameraInput" accept="image/*" capture="environment" aria-label="Prendre une photo de reçu">
       </div>
@@ -1948,10 +2016,13 @@ function howItWorksHTML() {
 }
 
 function scanPrivacyHTML() {
+  const message = aiEnabled()
+    ? `<strong>Assistant IA activé.</strong> Vos documents sont analysés localement, puis la photo est envoyée à Anthropic (Claude) uniquement au moment du scan pour une extraction plus fiable. Vous pouvez désactiver l’IA dans les paramètres : tout redevient 100 % local.`
+    : `<strong>Vos documents restent les vôtres.</strong> L’analyse et le stockage se font dans votre navigateur. Aucun document n’est envoyé à un serveur sans votre accord.`;
   return `
     <div class="scan-privacy">
       ${icon('shield')}
-      <p><strong>Vos documents restent les vôtres.</strong> L’analyse et le stockage se font dans votre navigateur. Aucun document n’est envoyé à un serveur sans votre accord.</p>
+      <p>${message}</p>
     </div>`;
 }
 
@@ -2023,7 +2094,7 @@ function scanResultPanelHTML() {
           <h2>Vérifiez l’extraction</h2>
           <p>Corrigez si besoin, puis ajoutez l’opération.</p>
         </div>
-        <span class="status-pill">${icon('sparkles')} Extrait</span>
+        <span class="status-pill">${extraction.ai ? icon('bot') + ' Extrait par l’IA' : icon('sparkles') + ' Extrait'}</span>
       </div>
       ${lowConfidence ? `
         <div class="confidence-banner low">
@@ -2293,7 +2364,11 @@ async function handleScanFile(file) {
   setTimeout(() => {
     if (token !== scannerState.token) return;
     setScanStep(2, 30);
-    runOCR(imageData, token, file.name);
+    if (aiEnabled()) {
+      runAIExtraction(imageData, token, file.name);
+    } else {
+      runOCR(imageData, token, file.name);
+    }
   }, 420);
 }
 
@@ -2411,6 +2486,106 @@ async function runOCR(imageData, token, fileName) {
       renderScanner();
       showToast('Lecture automatique indisponible', 'Saisissez les informations du document manuellement.', 'error');
     }, 500);
+  }
+}
+
+const AI_RECEIPT_SYSTEM = 'Tu es un extracteur de données de reçus, factures et tickets pour un petit commerce de proximité en Afrique de l’Ouest (zone FCFA). Tu réponds uniquement par un objet JSON valide, sans texte autour et sans balises Markdown.';
+
+function aiReceiptPrompt() {
+  return `Analyse la photo de ce reçu, ticket ou facture.
+Réponds avec un objet JSON de cette forme exacte :
+{"type":"expense","label":"libellé court de l’opération","amount":42500,"date":"${todayISO()}","party":"nom du commerçant ou fournisseur","category":"Achats","method":"Espèces","confidence":92,"lineItems":[{"description":"sac de riz 25 kg","amount":42500}],"note":""}
+Règles :
+- "type" vaut "income" pour une vente ou un encaissement, sinon "expense".
+- "amount" est un nombre entier en FCFA, sans séparateurs.
+- "date" au format AAAA-MM-JJ ; si elle est absente ou illisible, utilises ${todayISO()}.
+- "category" : une seule valeur parmi ${EXPENSE_CATEGORIES.join(', ')} pour une dépense, ou parmi ${INCOME_CATEGORIES.join(', ')} pour une vente.
+- "method" parmi : Espèces, Mobile Money, Virement, Chèque, Autre.
+- "confidence" : ta certitude globale de lecture, de 0 à 100.
+- "lineItems" : les lignes lisibles du document (0 à 8).
+- "note" : une précision utile éventuelle (vide sinon).
+Si la photo n’est pas un document financier exploitable, réponds : {"type":"expense","label":"Document illisible","amount":0,"confidence":0}.`;
+}
+
+async function runAIExtraction(imageData, token, fileName) {
+  try {
+    if (!navigator.onLine) throw new Error('Hors ligne');
+    const base64 = String(imageData).includes(',') ? String(imageData).split(',')[1] : String(imageData);
+    if (!base64) throw new Error('Image illisible');
+    setScanStep(2, 32);
+    setTimeout(() => {
+      if (token === scannerState.token) setScanStep(3, 58);
+    }, 900);
+    const text = await callClaudeAPI({
+      system: AI_RECEIPT_SYSTEM,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+          { type: 'text', text: aiReceiptPrompt() }
+        ]
+      }],
+      maxTokens: 900
+    });
+    if (token !== scannerState.token) return;
+    setScanStep(4, 88);
+    scannerState.ocrText = text;
+    const extraction = parseAIExtraction(text, fileName);
+    setTimeout(() => {
+      if (token !== scannerState.token) return;
+      scannerState.extraction = extraction;
+      scannerState.fallback = !extraction.amount || extraction.confidence < 65;
+      scannerState.phase = 'result';
+      renderScanner();
+      if (scannerState.fallback) {
+        showToast('Vérification nécessaire', 'L’IA a lu le document partiellement. Complétez les champs avant de valider.', 'error');
+      }
+    }, 380);
+  } catch (error) {
+    if (token !== scannerState.token) return;
+    console.warn('Extraction IA indisponible, retour à la lecture locale', error);
+    showToast('IA indisponible, lecture locale activée', error.message, 'error');
+    setScanStep(2, 30);
+    runOCR(imageData, token, fileName);
+  }
+}
+
+function parseAIExtraction(text, fileName) {
+  const fallback = createManualExtraction(fileName);
+  try {
+    const raw = String(text || '');
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start === -1 || end <= start) return fallback;
+    const parsed = JSON.parse(raw.slice(start, end + 1));
+    const type = parsed.type === 'income' ? 'income' : 'expense';
+    const categories = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+    const category = categories.includes(parsed.category) ? parsed.category : (type === 'income' ? 'Ventes' : 'Achats');
+    let date = String(parsed.date || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > todayISO() || Number.isNaN(parseISODate(date).getTime())) date = todayISO();
+    const amount = Math.max(0, Math.round(Number(parsed.amount) || 0));
+    const confidence = Math.max(0, Math.min(100, Math.round(Number(parsed.confidence) || 0)));
+    const methods = ['Espèces', 'Mobile Money', 'Virement', 'Chèque', 'Autre'];
+    const lineItems = Array.isArray(parsed.lineItems) ? parsed.lineItems.slice(0, 8).map(item => ({
+      description: String(item?.description || '').slice(0, 60),
+      amount: Math.max(0, Math.round(Number(item?.amount) || 0))
+    })).filter(item => item.description || item.amount) : [];
+    return {
+      type,
+      transactionLabel: String(parsed.label || fallback.transactionLabel).slice(0, 80) || fallback.transactionLabel,
+      category,
+      party: String(parsed.party || '').slice(0, 80),
+      amount,
+      date,
+      method: methods.includes(parsed.method) ? parsed.method : 'Espèces',
+      confidence,
+      lineItems,
+      note: String(parsed.note || '').slice(0, 240),
+      ai: true
+    };
+  } catch (error) {
+    console.warn('Réponse IA illisible', error);
+    return fallback;
   }
 }
 
@@ -3228,6 +3403,1155 @@ function launchPrint(html) {
   setTimeout(() => window.print(), 160);
 }
 
+/* =========================================================
+   Assistant IA — échéances, analyses, prévision, rapport
+   ========================================================= */
+
+/* ---------- Clé API et modèle ---------- */
+function getAIKey() {
+  try { return localStorage.getItem(AI_STORAGE_KEY) || ''; } catch (error) { return ''; }
+}
+function setAIKey(value) {
+  try {
+    const clean = String(value || '').trim();
+    if (clean) localStorage.setItem(AI_STORAGE_KEY, clean);
+    else localStorage.removeItem(AI_STORAGE_KEY);
+    return true;
+  } catch (error) {
+    console.warn('Clé IA non enregistrable', error);
+    return false;
+  }
+}
+function aiEnabled() { return Boolean(state?.ai?.enabled && getAIKey()); }
+function aiModel() { return state?.ai?.model || DEFAULT_AI_MODEL; }
+function aiModelLabel() {
+  const model = aiModel();
+  const found = (agentState.models || AI_MODELS_FALLBACK).find(item => item.id === model);
+  return found ? found.label : model;
+}
+function clockLabel(date) {
+  try { return `à ${new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' }).format(date)}`; } catch (error) { return ''; }
+}
+
+/* ---------- Dettes et créances ---------- */
+function dueDayLabel(dueDate) {
+  const days = Math.round((parseISODate(dueDate) - parseISODate(todayISO())) / 86400000);
+  if (days < 0) return `En retard de ${Math.abs(days)} j`;
+  if (days === 0) return 'Aujourd’hui';
+  if (days === 1) return 'Demain';
+  return `Dans ${days} j`;
+}
+
+function allDueItems() {
+  const today = todayISO();
+  const items = [
+    ...(state.debts || []).map(item => ({ ...item, kind: 'debt' })),
+    ...(state.receivables || []).map(item => ({ ...item, kind: 'receivable' }))
+  ];
+  return items.map(item => ({
+    ...item,
+    overdue: item.status !== 'settled' && item.dueDate < today,
+    dueLabel: dueDayLabel(item.dueDate)
+  })).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+}
+
+function openDueItems() { return allDueItems().filter(item => item.status !== 'settled'); }
+
+function dueItemTotals() {
+  const open = openDueItems();
+  const debts = open.filter(item => item.kind === 'debt');
+  const receivables = open.filter(item => item.kind === 'receivable');
+  return {
+    debts,
+    receivables,
+    debtTotal: sumTransactions(debts),
+    receivableTotal: sumTransactions(receivables),
+    overdueCount: open.filter(item => item.overdue).length
+  };
+}
+
+function guessExpenseCategory(text) {
+  const value = normalizeName(text);
+  if (/loyer|bail/.test(value)) return 'Loyer';
+  if (/transport|taxi|gbaka|carburant/.test(value)) return 'Transport';
+  if (/electric|facture cie|eau/.test(value)) return 'Électricité';
+  if (/salaire|employe/.test(value)) return 'Salaire';
+  if (/boisson|marchandise|riz|stock|commande|gros|achat/.test(value)) return 'Achats';
+  return 'Autres dépenses';
+}
+
+function settleDueItem(id) {
+  const item = allDueItems().find(entry => entry.id === id);
+  if (!item || item.status === 'settled') return;
+  const isDebt = item.kind === 'debt';
+  state.transactions.push({
+    id: uid('tx'),
+    type: isDebt ? 'expense' : 'income',
+    label: `${item.label || (isDebt ? 'Paiement' : 'Encaissement')} — ${item.party}`,
+    amount: Number(item.amount) || 0,
+    date: todayISO(),
+    category: isDebt ? guessExpenseCategory(`${item.label} ${item.party}`) : 'Ventes',
+    method: 'Espèces',
+    party: item.party,
+    note: `Règlement enregistré depuis l’assistant (${isDebt ? 'dette réglée' : 'créance encaissée'}).`,
+    source: 'manuel',
+    documentId: null,
+    createdAt: new Date().toISOString()
+  });
+  if (isDebt) state.debts = (state.debts || []).filter(entry => entry.id !== id);
+  else state.receivables = (state.receivables || []).filter(entry => entry.id !== id);
+  saveState();
+  renderAssistant();
+  updateChrome();
+  showToast(
+    isDebt ? 'Dette réglée' : 'Créance encaissée',
+    `${formatAmount(item.amount)} ${isDebt ? 'payés à' : 'reçus de'} ${item.party}. L’opération a été ajoutée au journal.`
+  );
+}
+
+function openDueDialog(item = null, kind = 'debt') {
+  const dialog = $('#debtDialog');
+  if (!dialog) return;
+  const form = $('#debtForm');
+  if (!form) return;
+  form.reset();
+  $('#debtFormError').hidden = true;
+  const isEditing = Boolean(item);
+  const resolvedKind = item?.kind === 'receivable' || (!item && kind === 'receivable') ? 'receivable' : 'debt';
+  const title = isEditing ? 'Modifier l’échéance' : resolvedKind === 'receivable' ? 'Ajouter une créance' : 'Ajouter une dette';
+  $('#debtDialogTitle').textContent = title;
+  $('#debtDialogEyebrow').textContent = isEditing ? 'Mise à jour' : 'Nouvelle échéance';
+  $('#debtSubmitButton').textContent = isEditing ? 'Enregistrer les modifications' : 'Ajouter l’échéance';
+  $('#debtDeleteButton').hidden = !isEditing;
+  $('#debtId').value = item?.id || '';
+  $('#debtKindDebt').checked = resolvedKind === 'debt';
+  $('#debtKindReceivable').checked = resolvedKind === 'receivable';
+  $('#debtAmount').value = item?.amount || '';
+  $('#debtParty').value = item?.party || '';
+  $('#debtLabel').value = item?.label || '';
+  $('#debtDueDate').value = item?.dueDate || toISODate(addDays(new Date(), 7));
+  $('#debtNote').value = item?.note || '';
+  if (!dialog.open) dialog.showModal();
+  setTimeout(() => $('#debtParty')?.focus(), 80);
+}
+
+function saveDueForm() {
+  const form = $('#debtForm');
+  if (!form) return;
+  const data = new FormData(form);
+  const id = String(data.get('debt-id') || '');
+  const kind = data.get('debt-kind') === 'receivable' ? 'receivable' : 'debt';
+  const amount = Math.round(Number(data.get('debt-amount')) || 0);
+  const party = String(data.get('debt-party') || '').trim();
+  const label = String(data.get('debt-label') || '').trim();
+  const dueDate = String(data.get('debt-due-date') || '');
+  const note = String(data.get('debt-note') || '').trim();
+  if (!amount || amount <= 0) { showFormError($('#debtFormError'), 'Indiquez un montant supérieur à zéro.'); return; }
+  if (!party) { showFormError($('#debtFormError'), 'Indiquez la personne ou l’entreprise concernée.'); return; }
+  if (!dueDate) { showFormError($('#debtFormError'), 'Choisissez une date d’échéance.'); return; }
+  $('#debtFormError').hidden = true;
+
+  const payload = { type: kind, amount, party, label, dueDate, note };
+  if (id) {
+    const existing = allDueItems().find(entry => entry.id === id);
+    const updated = {
+      id,
+      status: 'open',
+      createdAt: existing?.createdAt || new Date().toISOString(),
+      ...payload
+    };
+    state.debts = (state.debts || []).filter(entry => entry.id !== id);
+    state.receivables = (state.receivables || []).filter(entry => entry.id !== id);
+    if (kind === 'debt') state.debts.push(updated);
+    else state.receivables.push(updated);
+    showToast('Échéance mise à jour', `${party} · ${formatAmount(amount)}.`);
+  } else {
+    const target = kind === 'debt' ? state.debts : state.receivables;
+    target.push({ id: uid(kind === 'debt' ? 'debt' : 'rec'), ...payload, status: 'open', createdAt: new Date().toISOString() });
+    showToast(kind === 'debt' ? 'Dette enregistrée' : 'Créance enregistrée', `${party} · ${formatAmount(amount)} · échéance le ${formatDate(dueDate)}.`);
+  }
+  saveState();
+  closeDialog('debtDialog');
+  renderAssistant();
+  updateChrome();
+}
+
+function deleteDueFromDialog() {
+  const id = $('#debtId')?.value || '';
+  if (!id) return;
+  const item = allDueItems().find(entry => entry.id === id);
+  state.debts = (state.debts || []).filter(entry => entry.id !== id);
+  state.receivables = (state.receivables || []).filter(entry => entry.id !== id);
+  saveState();
+  closeDialog('debtDialog');
+  renderAssistant();
+  updateChrome();
+  if (item) showToast('Échéance supprimée', `${item.party} · ${formatAmount(item.amount)}.`);
+}
+
+/* ---------- Analyses locales ---------- */
+function getTreasuryNow() {
+  const income = sumTransactions(state.transactions.filter(tx => tx.type === 'income'));
+  const expense = sumTransactions(state.transactions.filter(tx => tx.type === 'expense'));
+  return Number(state.profile.openingBalance || 0) + income - expense;
+}
+
+function normalizeName(value) {
+  return String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function hasJustification(tx) {
+  return Boolean(tx.documentId && state.documents.some(doc => doc.id === tx.documentId));
+}
+
+function countMissingDocs(days = 60) {
+  const cutoff = toISODate(addDays(new Date(), -days));
+  return state.transactions.filter(tx => tx.date >= cutoff && !hasJustification(tx)).length;
+}
+
+function detectAnomalies() {
+  const anomalies = [];
+  const transactions = sortedTransactions();
+
+  // Doublons potentiels : même montant, même date, libellé très proche
+  const seen = [];
+  const duplicates = [];
+  transactions.forEach(tx => {
+    const signature = `${tx.type}|${Number(tx.amount)}|${tx.date}`;
+    const name = normalizeName(tx.label);
+    const match = seen.find(item => item.signature === signature && item.name === name);
+    if (match) duplicates.push({ tx, other: match.tx });
+    else seen.push({ signature, name, tx });
+  });
+  duplicates.slice(0, 3).forEach(({ tx }) => {
+    anomalies.push({
+      severity: 'medium',
+      icon: 'copy',
+      title: 'Doublon possible',
+      detail: `« ${tx.label} » (${formatAmount(tx.amount)}) apparaît deux fois le ${formatDate(tx.date)}. Vérifiez puis supprimez la ligne en trop si besoin.`,
+      actionLabel: 'Vérifier',
+      action: 'edit-transaction',
+      id: tx.id
+    });
+  });
+
+  // Montants inhabituels dans une catégorie (au moins 6 opérations)
+  const byCategory = new Map();
+  transactions.forEach(tx => {
+    if (!byCategory.has(tx.category)) byCategory.set(tx.category, []);
+    byCategory.get(tx.category).push(tx);
+  });
+  const outliers = [];
+  byCategory.forEach((list, category) => {
+    if (list.length < 6) return;
+    const amounts = list.map(tx => Number(tx.amount) || 0);
+    const mean = amounts.reduce((sum, value) => sum + value, 0) / amounts.length;
+    if (mean <= 0) return;
+    const variance = amounts.reduce((sum, value) => sum + (value - mean) ** 2, 0) / amounts.length;
+    const deviation = Math.sqrt(variance);
+    if (!deviation) return;
+    list.forEach(tx => {
+      const z = ((Number(tx.amount) || 0) - mean) / deviation;
+      if (z >= 2.6 && Number(tx.amount) > 5000) outliers.push({ tx, category, mean, z });
+    });
+  });
+  outliers.sort((a, b) => b.z - a.z).slice(0, 2).forEach(({ tx, category, mean }) => {
+    anomalies.push({
+      severity: 'medium',
+      icon: 'trending',
+      title: 'Montant inhabituel',
+      detail: `${tx.label} : ${formatAmount(tx.amount)} le ${formatDate(tx.date)}, très au-dessus de votre moyenne « ${category} » (${formatAmount(mean)}). Erreur de saisie possible.`,
+      actionLabel: 'Vérifier',
+      action: 'edit-transaction',
+      id: tx.id
+    });
+  });
+
+  // Justificatifs manquants récents
+  const missingDocs = countMissingDocs(60);
+  if (missingDocs >= 3) {
+    anomalies.push({
+      severity: 'low',
+      icon: 'file',
+      title: 'Justificatifs manquants',
+      detail: `${missingDocs} opérations des 60 derniers jours n’ont pas de document scanné. Ajoutez les reçus pour renforcer votre dossier de financement.`,
+      actionLabel: 'Scanner',
+      action: 'view',
+      view: 'scanner'
+    });
+  }
+
+  // Échéances en retard
+  openDueItems().filter(item => item.overdue).forEach(item => {
+    anomalies.push({
+      severity: 'high',
+      icon: 'clock',
+      title: item.kind === 'debt' ? 'Dette échue' : 'Créance en retard',
+      detail: item.kind === 'debt'
+        ? `${item.party} attend ${formatAmount(item.amount)} depuis le ${formatDate(item.dueDate)}. Réglez ou renégociez pour préserver votre crédit fournisseur.`
+        : `${item.party} vous doit ${formatAmount(item.amount)} depuis le ${formatDate(item.dueDate)}. Un rappel téléphonique suffit souvent à débloquer le paiement.`,
+      actionLabel: 'Voir l’échéance',
+      action: 'view',
+      view: 'assistant'
+    });
+  });
+
+  // Trésorerie prévisionnelle négative
+  const forecast = forecastTreasury(45);
+  if (forecast.lowest.balance < 0) {
+    anomalies.push({
+      severity: 'high',
+      icon: 'wallet',
+      title: 'Trésorerie prévisionnelle négative',
+      detail: `Au rythme actuel, votre caisse passerait sous zéro vers le ${formatDate(forecast.lowest.date)} (${formatAmount(Math.round(forecast.lowest.balance))}). Prévoyez environ ${formatAmount(Math.abs(Math.round(forecast.lowest.balance)))} pour couvrir vos échéances.`,
+      actionLabel: 'Voir la prévision',
+      action: 'view',
+      view: 'assistant'
+    });
+  }
+  return anomalies;
+}
+
+function forecastTreasury(days = 45) {
+  const today = new Date();
+  const last28 = getFinancials(toISODate(addDays(today, -27)), todayISO());
+  const netDaily = last28.net / 28;
+  const opening = getTreasuryNow();
+  const limit = toISODate(addDays(today, days));
+  const events = openDueItems()
+    .filter(item => item.dueDate >= todayISO() && item.dueDate <= limit)
+    .map(item => ({ date: item.dueDate, delta: item.kind === 'receivable' ? item.amount : -item.amount, item }));
+  let balance = opening;
+  const series = [{ date: todayISO(), balance }];
+  let lowest = { date: todayISO(), balance };
+  for (let index = 1; index <= days; index += 1) {
+    balance += netDaily;
+    const dateISO = toISODate(addDays(today, index));
+    events.filter(event => event.date === dateISO).forEach(event => { balance += event.delta; });
+    series.push({ date: dateISO, balance });
+    if (balance < lowest.balance) lowest = { date: dateISO, balance };
+  }
+  return { days, opening, netDaily, series, events, lowest, final: series[series.length - 1].balance };
+}
+
+function getMissingInfoList() {
+  const items = [];
+  getChecklistItems().filter(item => !item.done).forEach(item => items.push(`${item.label} (${item.hint})`));
+  const missingDocs = countMissingDocs(60);
+  if (missingDocs > 0) items.push(`${missingDocs} opération${missingDocs > 1 ? 's' : ''} des 60 derniers jours sans justificatif scanné`);
+  return items;
+}
+
+function buildRecommendations() {
+  const recommendations = [];
+  const period = getPeriodData('month');
+  const { current } = period;
+  const totals = dueItemTotals();
+  const overdueReceivables = totals.receivables.filter(item => item.overdue);
+  const forecast = forecastTreasury(45);
+
+  if (overdueReceivables.length) {
+    const total = sumTransactions(overdueReceivables);
+    recommendations.push({
+      icon: 'phone',
+      tone: 'risk',
+      title: `Relancez ${overdueReceivables.length} client${overdueReceivables.length > 1 ? 's' : ''}`,
+      detail: `${formatAmount(total)} dorment dans les ardoises de vos clients depuis plus d’une semaine. Un rappel amical par téléphone débloque souvent le paiement.`
+    });
+  }
+  if (current.income > 0 && current.expense > current.income) {
+    recommendations.push({
+      icon: 'sliders',
+      tone: 'risk',
+      title: 'Rééquilibrez le mois en cours',
+      detail: `Ce mois, ${formatAmount(current.expense)} de dépenses pour ${formatAmount(current.income)} de ventes. Reportez les achats non urgents et poussez les produits qui tournent le plus vite.`
+    });
+  }
+  const expensesBreakdown = getBreakdown(current.transactions, 'expense');
+  const topExpense = expensesBreakdown[0];
+  if (topExpense && topExpense.share >= 35) {
+    recommendations.push({
+      icon: 'coins',
+      tone: 'tip',
+      title: `Négociez vos achats « ${topExpense.category} »`,
+      detail: `Cette ligne représente ${Math.round(topExpense.share)} % de vos dépenses du mois (${formatAmount(topExpense.amount)}). Un prix de gros ou un paiement groupé peut l’alléger.`
+    });
+  }
+  if (forecast.lowest.balance < 0) {
+    recommendations.push({
+      icon: 'wallet',
+      tone: 'risk',
+      title: 'Anticipez un besoin de trésorerie',
+      detail: `Votre caisse pourrait manquer d’environ ${formatAmount(Math.abs(Math.round(forecast.lowest.balance)))} vers le ${formatDate(forecast.lowest.date)}. Décalez un paiement fournisseur ou accélérez les encaissements avant cette date.`
+    });
+  } else if (forecast.netDaily > 0) {
+    const weeklyNet = Math.round(forecast.netDaily * 7);
+    const reserve = Math.max(500, Math.round((weeklyNet * 0.1) / 500) * 500);
+    recommendations.push({
+      icon: 'target',
+      tone: 'tip',
+      title: 'Constituez une réserve de précaution',
+      detail: `Votre activité dégage environ ${formatAmount(weeklyNet)} par semaine. Mettre de côté ${formatAmount(reserve)} chaque semaine sécurise vos échéances et rassure un financeur.`
+    });
+  }
+  const missing = getMissingInfoList();
+  if (missing.length) {
+    recommendations.push({
+      icon: 'file',
+      tone: 'tip',
+      title: 'Complétez vos preuves',
+      detail: `Il manque encore : ${missing[0].toLowerCase()}${missing.length > 1 ? ` (+${missing.length - 1} autre${missing.length > 2 ? 's' : ''} élément${missing.length > 2 ? 's' : ''})` : ''}. Chaque justificatif renforce votre dossier.`
+    });
+  }
+  if (recommendations.length < 3) {
+    recommendations.push({
+      icon: 'sparkles',
+      tone: 'tip',
+      title: 'Gardez le rythme',
+      detail: 'Continuez à saisir ventes et dépenses chaque jour : plus vos données sont régulières, plus votre dossier de financement inspire confiance.'
+    });
+  }
+  return recommendations.slice(0, 5);
+}
+
+function buildAgentReportData() {
+  return {
+    period: getPeriodData('month'),
+    months: getMonthlySeries(6),
+    forecast: forecastTreasury(45),
+    anomalies: detectAnomalies(),
+    readiness: getReadiness(),
+    totals: dueItemTotals(),
+    missing: getMissingInfoList(),
+    recommendations: buildRecommendations(),
+    expensesBreakdown: getBreakdown(getPeriodData('month').current.transactions, 'expense'),
+    treasury: getTreasuryNow(),
+    generatedAt: new Date()
+  };
+}
+
+function agentReportText(data = buildAgentReportData()) {
+  const { period, months, forecast, anomalies, readiness, totals, missing, recommendations } = data;
+  const lines = [];
+  lines.push(`RAPPORT FINANCIER — ${state.profile.business}`);
+  lines.push(`${todayLongLabel()} · généré par l’assistant Sika · montants en ${CURRENCY}`);
+  lines.push('');
+  lines.push('1. SITUATION DU MOIS');
+  lines.push(`• Ventes : ${formatAmount(period.current.income)} · Dépenses : ${formatAmount(period.current.expense)} · Résultat : ${formatAmount(period.current.net)}`);
+  lines.push(`• Trésorerie estimée : ${formatAmount(data.treasury)}`);
+  lines.push(`• Créances à recevoir : ${formatAmount(totals.receivableTotal)} (dont ${totals.receivables.filter(item => item.overdue).length} en retard) · Dettes à payer : ${formatAmount(totals.debtTotal)}`);
+  lines.push(`• Score de préparation au financement : ${readiness.score}/100 (${readiness.label.toLowerCase()})`);
+  lines.push('');
+  lines.push('2. ÉVOLUTION DES 6 DERNIERS MOIS');
+  months.forEach(month => {
+    lines.push(`• ${capitalize(month.fullLabel)} : ventes ${formatAmount(month.income)} · dépenses ${formatAmount(month.expense)} · résultat ${formatAmount(month.net)}`);
+  });
+  lines.push('');
+  lines.push('3. POINTS DE VIGILANCE');
+  if (anomalies.length) anomalies.forEach(anomaly => lines.push(`• [${anomaly.title}] ${anomaly.detail}`));
+  else lines.push('• Aucune anomalie détectée sur vos écritures.');
+  lines.push('');
+  lines.push(`4. TRÉSORERIE PRÉVISIONNELLE (${forecast.days} JOURS)`);
+  lines.push(`• Résultat net moyen récent : ${formatAmount(Math.round(forecast.netDaily))} par jour`);
+  lines.push(`• Point le plus bas estimé : ${formatAmount(Math.round(forecast.lowest.balance))} vers le ${formatDate(forecast.lowest.date)}${forecast.lowest.balance < 0 ? ` → besoin de trésorerie d’environ ${formatAmount(Math.abs(Math.round(forecast.lowest.balance)))}` : ''}`);
+  if (forecast.events.length) {
+    lines.push('• Échéances à venir :');
+    forecast.events.forEach(event => {
+      lines.push(`   - ${formatDate(event.date)} · ${event.item.kind === 'debt' ? 'À payer' : 'À recevoir'} · ${event.item.party} · ${formatAmount(event.item.amount)}`);
+    });
+  } else {
+    lines.push('• Aucune échéance enregistrée dans les 45 prochains jours.');
+  }
+  lines.push('');
+  lines.push('5. RECOMMANDATIONS');
+  recommendations.forEach((recommendation, index) => lines.push(`${index + 1}. ${recommendation.title} — ${recommendation.detail}`));
+  lines.push('');
+  lines.push('6. INFORMATIONS MANQUANTES POUR LE DOSSIER');
+  if (missing.length) missing.forEach(item => lines.push(`• ${item}`));
+  else lines.push('• Dossier complet : toutes les pièces demandées sont réunies.');
+  lines.push('');
+  lines.push('Rapport de travail à remettre à votre banque ou organisme de financement. Les données proviennent de vos saisies quotidiennes.');
+  return lines.join('\n');
+}
+
+/* ---------- Rendu de la page Assistant ---------- */
+function agentStatusPillHTML() {
+  if (aiEnabled()) {
+    return `<span class="status-pill ok">${icon('check')} IA connectée · ${escapeHTML(aiModelLabel())}</span>`;
+  }
+  if (state.ai?.enabled && !getAIKey()) {
+    return `<span class="status-pill warn">${icon('alert')} Clé API manquante — <button type="button" class="text-link" data-view="settings">compléter</button></span>`;
+  }
+  return `<span class="status-pill">${icon('lock')} Analyse locale active — <button type="button" class="text-link" data-view="settings">activer l’IA</button></span>`;
+}
+
+function agentStatHTML(iconName, tone, label, value, meta) {
+  return `
+    <article class="agent-stat">
+      <span class="agent-stat-icon ${tone}">${icon(iconName)}</span>
+      <div class="agent-stat-copy">
+        <small>${escapeHTML(label)}</small>
+        <strong>${escapeHTML(value)}</strong>
+        <span>${escapeHTML(meta)}</span>
+      </div>
+    </article>`;
+}
+
+function agentStatsHTML(data) {
+  const { period, totals, forecast } = data;
+  const netTrend = compareMetric(period.current.net, period.previous.net);
+  const nextDebt = totals.debts[0];
+  const overdueReceivables = totals.receivables.filter(item => item.overdue);
+  return `
+    <div class="agent-stats">
+      ${agentStatHTML('wallet', 'forest', 'Trésorerie estimée', formatAmount(data.treasury), `Solde initial + mouvements · tendance ${formatAmount(Math.round(forecast.netDaily))}/jour`)}
+      ${agentStatHTML('trending', period.current.net >= 0 ? 'green' : 'terra', 'Résultat du mois', formatAmount(period.current.net), `vs mois précédent · ${netTrend.text}`)}
+      ${agentStatHTML('arrow-down-left', 'green', 'À recevoir', formatAmount(totals.receivableTotal), overdueReceivables.length ? `${overdueReceivables.length} en retard · ${formatAmount(sumTransactions(overdueReceivables))}` : `${totals.receivables.length} créance${totals.receivables.length > 1 ? 's' : ''} en cours`)}
+      ${agentStatHTML('arrow-up-right', 'amber', 'À payer', formatAmount(totals.debtTotal), nextDebt ? `Prochaine : ${nextDebt.party} ${nextDebt.dueLabel.toLowerCase()}` : 'Aucune dette enregistrée')}
+    </div>`;
+}
+
+function agentAnomaliesHTML(data) {
+  const list = data.anomalies;
+  return `
+    <section class="card agent-card">
+      <div class="agent-card-head">
+        <div>
+          <h2>${icon('alert')} Alertes & anomalies</h2>
+          <p>Erreurs de saisie, retards et risques détectés automatiquement.</p>
+        </div>
+        <span class="agent-badge ${list.length ? 'warn' : 'ok'}">${list.length ? `${list.length} à traiter` : 'Tout est net'}</span>
+      </div>
+      ${list.length ? `
+        <div class="agent-alerts">
+          ${list.map(anomaly => `
+            <div class="agent-alert ${anomaly.severity}">
+              <span class="agent-alert-icon">${icon(anomaly.icon)}</span>
+              <div class="agent-alert-copy">
+                <strong>${escapeHTML(anomaly.title)}</strong>
+                <p>${escapeHTML(anomaly.detail)}</p>
+              </div>
+              ${anomaly.action ? `<button type="button" class="btn btn-ghost btn-sm" data-action="${escapeHTML(anomaly.action)}" data-id="${escapeHTML(anomaly.id || '')}" data-view="${escapeHTML(anomaly.view || '')}">${escapeHTML(anomaly.actionLabel || 'Vérifier')}</button>` : ''}
+            </div>`).join('')}
+        </div>` : `
+        <div class="agent-empty">${icon('check-circle')}<p>Aucune anomalie détectée. Continuez à saisir vos opérations régulièrement.</p></div>`}
+    </section>`;
+}
+
+function treasuryChartHTML(forecast) {
+  const width = 640;
+  const height = 210;
+  const padX = 18;
+  const padY = 26;
+  const values = forecast.series.map(point => point.balance);
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 0);
+  const span = (max - min) || 1;
+  const x = index => padX + (index / (forecast.series.length - 1)) * (width - padX * 2);
+  const y = value => height - padY - ((value - min) / span) * (height - padY * 2);
+  const points = forecast.series.map((point, index) => `${x(index).toFixed(1)},${y(point.balance).toFixed(1)}`).join(' ');
+  const zeroY = y(0).toFixed(1);
+  const events = forecast.events.map(event => {
+    const index = forecast.series.findIndex(point => point.date === event.date);
+    if (index < 0) return '';
+    return `<circle class="agent-chart-event ${event.delta < 0 ? 'out' : 'in'}" cx="${x(index).toFixed(1)}" cy="${y(forecast.series[index].balance).toFixed(1)}" r="4.2"><title>${escapeXml(event.item.party)} — ${event.delta < 0 ? '−' : '+'}${formatNumber(Math.abs(event.delta))} ${CURRENCY}</title></circle>`;
+  }).join('');
+  const lowestIndex = forecast.series.findIndex(point => point.balance === forecast.lowest.balance);
+  const lowestDot = lowestIndex >= 0
+    ? `<circle class="agent-chart-lowest" cx="${x(lowestIndex).toFixed(1)}" cy="${y(forecast.lowest.balance).toFixed(1)}" r="5"><title>Point le plus bas : ${formatAmount(Math.round(forecast.lowest.balance))}</title></circle>`
+    : '';
+  return `
+    <div class="agent-chart-wrap">
+      <svg class="agent-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Prévision de trésorerie sur ${forecast.days} jours">
+        <line class="agent-chart-zero" x1="${padX}" x2="${width - padX}" y1="${zeroY}" y2="${zeroY}"></line>
+        <polyline class="agent-chart-area" points="${padX},${height - padY} ${points} ${width - padX},${height - padY}"></polyline>
+        <polyline class="agent-chart-line" points="${points}"></polyline>
+        ${events}
+        ${lowestDot}
+      </svg>
+    </div>`;
+}
+
+function agentTreasuryHTML(data) {
+  const { forecast } = data;
+  const negative = forecast.lowest.balance < 0;
+  const events = forecast.events;
+  return `
+    <section class="card agent-card">
+      <div class="agent-card-head">
+        <div>
+          <h2>${icon('trending')} Trésorerie prévisionnelle · ${forecast.days} jours</h2>
+          <p>Projection à partir de votre rythme récent (${formatAmount(Math.round(forecast.netDaily))}/jour) et de vos échéances.</p>
+        </div>
+        <span class="agent-badge ${negative ? 'alert' : 'ok'}">${negative ? `Besoin ≈ ${formatAmount(Math.abs(Math.round(forecast.lowest.balance)))}` : 'Sous contrôle'}</span>
+      </div>
+      ${treasuryChartHTML(forecast)}
+      <div class="agent-treasury-summary">
+        <div class="agent-treasury-line ${negative ? 'alert' : ''}">
+          ${icon(negative ? 'alert' : 'check-circle')}
+          <span>Point le plus bas estimé : <strong>${formatAmount(Math.round(forecast.lowest.balance))}</strong> vers le <strong>${formatDate(forecast.lowest.date)}</strong>${negative ? ` — prévoyez environ ${formatAmount(Math.abs(Math.round(forecast.lowest.balance)))} pour passer ce cap.` : '.'}</span>
+        </div>
+        ${events.length ? `
+          <ul class="agent-treasury-events">
+            ${events.map(event => `
+              <li class="${event.delta < 0 ? 'out' : 'in'}">
+                <span class="agent-event-date">${formatDate(event.date)}</span>
+                <span class="agent-event-party">${escapeHTML(event.item.party)}</span>
+                <span class="agent-event-amount">${event.delta < 0 ? '−' : '+'}${formatAmount(Math.abs(event.delta))}</span>
+              </li>`).join('')}
+          </ul>` : `
+          <p class="agent-muted">Aucune échéance enregistrée dans les 45 prochains jours.</p>`}
+      </div>
+    </section>`;
+}
+
+function dueGroupHTML(kind, items, total) {
+  const meta = kind === 'debt'
+    ? { label: 'À payer', icon: 'arrow-up-right', className: 'expense' }
+    : { label: 'À recevoir', icon: 'arrow-down-left', className: 'income' };
+  return `
+    <div class="due-group">
+      <div class="due-group-head">
+        <span class="due-group-title ${meta.className}">${icon(meta.icon)} ${meta.label}</span>
+        <strong>${formatAmount(total)}</strong>
+      </div>
+      ${items.length ? `
+        <div class="due-list">
+          ${items.map(item => `
+            <div class="due-item ${item.overdue ? 'is-overdue' : ''}">
+              <button type="button" class="due-item-main" data-action="edit-due" data-id="${escapeHTML(item.id)}" aria-label="Modifier l’échéance ${escapeHTML(item.party)}">
+                <strong>${escapeHTML(item.party)}</strong>
+                <small>${escapeHTML(item.label || 'Échéance')} · ${formatDate(item.dueDate)}</small>
+              </button>
+              <span class="due-amount">${formatAmount(item.amount)}</span>
+              <span class="due-chip ${item.overdue ? 'overdue' : ''}">${escapeHTML(item.dueLabel)}</span>
+              <button type="button" class="due-settle" data-action="settle-due" data-id="${escapeHTML(item.id)}" title="Enregistrer le règlement et solder l’échéance" aria-label="Marquer réglée">${icon('check')}</button>
+            </div>`).join('')}
+        </div>` : `
+        <p class="agent-muted">Rien pour le moment.</p>`}
+    </div>`;
+}
+
+function agentDueItemsHTML(data) {
+  const { debts, receivables, debtTotal, receivableTotal } = data.totals;
+  return `
+    <section class="card agent-card">
+      <div class="agent-card-head">
+        <div>
+          <h2>${icon('coins')} Dettes & créances</h2>
+          <p>Ce que vous devez et ce qu’on vous doit, avec les échéances.</p>
+        </div>
+      </div>
+      <div class="agent-head-actions agent-head-actions-left">
+        <button type="button" class="btn btn-secondary btn-sm" data-action="add-due" data-kind="receivable">${icon('plus', 'icon-sm')} À recevoir</button>
+        <button type="button" class="btn btn-secondary btn-sm" data-action="add-due" data-kind="debt">${icon('plus', 'icon-sm')} À payer</button>
+      </div>
+      ${dueGroupHTML('receivable', receivables, receivableTotal)}
+      ${dueGroupHTML('debt', debts, debtTotal)}
+    </section>`;
+}
+
+function agentRecommendationsHTML(data) {
+  return `
+    <section class="card agent-card">
+      <div class="agent-card-head">
+        <div>
+          <h2>${icon('sparkles')} Recommandations</h2>
+          <p>Conseils concrets calculés sur vos données du moment.</p>
+        </div>
+      </div>
+      <div class="agent-reco-list">
+        ${data.recommendations.map((recommendation, index) => `
+          <div class="agent-reco ${recommendation.tone}">
+            <span class="agent-reco-index">${index + 1}</span>
+            <div class="agent-reco-copy">
+              <strong>${escapeHTML(recommendation.title)}</strong>
+              <p>${escapeHTML(recommendation.detail)}</p>
+            </div>
+            <span class="agent-reco-icon">${icon(recommendation.icon)}</span>
+          </div>`).join('')}
+      </div>
+    </section>`;
+}
+
+function agentAnalysisHTML() {
+  if (!agentState.analysis && agentState.busy !== 'analysis') return '';
+  return `
+    <section class="card agent-card agent-ai-card">
+      <div class="agent-card-head">
+        <div>
+          <h2>${icon('bot')} Analyse de l’IA</h2>
+          <p>Lecture par ${escapeHTML(aiModelLabel())}${agentState.analysisAt ? ` · ${clockLabel(agentState.analysisAt)}` : ''}</p>
+        </div>
+      </div>
+      ${agentState.busy === 'analysis'
+        ? `<div class="agent-typing"><span></span><span></span><span></span><em>Sika analyse vos chiffres…</em></div>`
+        : `<div class="agent-ai-text">${miniMarkdown(agentState.analysis)}</div>`}
+    </section>`;
+}
+
+function miniMarkdown(text) {
+  const escaped = escapeHTML(text);
+  const inline = value => value.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\*(.+?)\*/g, '<em>$1</em>');
+  const lines = escaped.split('\n');
+  let html = '';
+  let inList = false;
+  const closeList = () => { if (inList) { html += '</ul>'; inList = false; } };
+  lines.forEach(raw => {
+    const line = raw.trim();
+    if (!line) { closeList(); return; }
+    if (/^#{1,4}\s+/.test(line)) {
+      closeList();
+      html += `<h4 class="agent-md-h">${inline(line.replace(/^#{1,4}\s+/, ''))}</h4>`;
+      return;
+    }
+    const bullet = line.match(/^[-*•]\s+(.*)$/);
+    const numbered = line.match(/^\d+[.)]\s+(.*)$/);
+    if (bullet || numbered) {
+      if (!inList) { html += '<ul class="agent-md-list">'; inList = true; }
+      html += `<li>${inline(bullet ? bullet[1] : numbered[1])}</li>`;
+      return;
+    }
+    closeList();
+    html += `<p>${inline(line)}</p>`;
+  });
+  closeList();
+  return html;
+}
+
+function agentReportHTML(data) {
+  const aiReport = Boolean(agentState.report);
+  const text = aiReport ? agentState.report : agentReportText(data);
+  return `
+    <section class="card agent-card">
+      <div class="agent-card-head">
+        <div>
+          <h2>${icon('file')} Rapport financier actualisé</h2>
+          <p>${aiReport ? `Rédigé par ${escapeHTML(aiModelLabel())}${agentState.reportAt ? ` · ${clockLabel(agentState.reportAt)}` : ''}` : 'Version générée par le moteur local — fonctionne sans connexion.'}</p>
+        </div>
+        <div class="agent-head-actions">
+          <button type="button" class="btn btn-secondary btn-sm" data-action="copy-agent-report">${icon('copy', 'icon-sm')} Copier</button>
+          <button type="button" class="btn btn-secondary btn-sm" data-action="print-agent-report">${icon('printer', 'icon-sm')} Imprimer</button>
+          <button type="button" class="btn btn-primary btn-sm" data-action="run-agent-report" ${agentState.busy ? 'disabled' : ''}>${agentState.busy === 'report' ? 'Rédaction…' : (aiReport ? 'Regénérer avec l’IA' : 'Rédiger avec l’IA')}</button>
+        </div>
+      </div>
+      <pre class="agent-report-text">${escapeHTML(text)}</pre>
+    </section>`;
+}
+
+function agentChatHTML() {
+  if (!aiEnabled()) {
+    return `
+      <section class="card agent-card">
+        <div class="agent-card-head">
+          <div>
+            <h2>${icon('bot')} Poser une question à Sika</h2>
+            <p>« Vais-je pouvoir payer le loyer cette semaine ? », « Comment réduire mes charges ? »…</p>
+          </div>
+        </div>
+        <div class="agent-empty">
+          ${icon('lock')}
+          <p>Connectez votre clé API Anthropic dans les <button type="button" class="text-link" data-view="settings">paramètres</button> pour discuter avec l’assistant. Sans clé, les analyses locales restent disponibles.</p>
+        </div>
+      </section>`;
+  }
+  return `
+    <section class="card agent-card">
+      <div class="agent-card-head">
+        <div>
+          <h2>${icon('bot')} Poser une question à Sika</h2>
+          <p>L’assistant connaît vos chiffres et répond avec vos données réelles.</p>
+        </div>
+      </div>
+      <div class="agent-chat" id="agentChat">
+        ${agentState.chat.length
+          ? agentState.chat.map(message => `<div class="agent-msg ${message.role}">${message.role === 'assistant' ? miniMarkdown(message.content) : `<p>${escapeHTML(message.content)}</p>`}</div>`).join('')
+          : `<p class="agent-chat-hint">Exemple : « Vais-je pouvoir payer le loyer cette semaine ? »</p>`}
+        ${agentState.busy === 'chat' ? '<div class="agent-msg assistant agent-typing"><span></span><span></span><span></span></div>' : ''}
+      </div>
+      <form class="agent-chat-form" id="agentAskForm" novalidate>
+        <input type="text" id="agentQuestionInput" placeholder="Écrivez votre question…" maxlength="300" autocomplete="off" ${agentState.busy === 'chat' ? 'disabled' : ''}>
+        <button type="submit" class="btn btn-primary" ${agentState.busy === 'chat' ? 'disabled' : ''}>${icon('send', 'icon-sm')} Envoyer</button>
+      </form>
+    </section>`;
+}
+
+function renderAssistant() {
+  const page = $('.page[data-page="assistant"]');
+  if (!page) return;
+  const data = buildAgentReportData();
+  page.innerHTML = `
+    <div class="page-head">
+      <div class="page-head-main">
+        <p class="eyebrow">Assistant Sika</p>
+        <h1 class="page-title" id="assistantTitle">Votre copilote <em>financier.</em></h1>
+        <p class="page-subtitle">Dettes et créances, alertes, prévision de trésorerie et rapport prêt à présenter — avec ou sans IA connectée.</p>
+      </div>
+      <div class="page-actions">
+        <button type="button" class="btn btn-secondary" data-action="run-agent-analysis" ${agentState.busy ? 'disabled' : ''}>${icon('sparkles', 'icon-sm')} ${agentState.busy === 'analysis' ? 'Analyse en cours…' : 'Analyser avec l’IA'}</button>
+        <button type="button" class="btn btn-primary" data-action="print-agent-report">${icon('printer', 'icon-sm')} Imprimer le rapport</button>
+      </div>
+    </div>
+    <div class="agent-status-row">${agentStatusPillHTML()}
+      <span class="agent-status-note">${icon('shield')} Sans clé API, tout reste dans votre navigateur. Avec l’IA, seul un résumé chiffré (jamais vos photos) est envoyé à Anthropic.</span>
+    </div>
+    ${agentStatsHTML(data)}
+    <div class="agent-grid">
+      <div class="agent-column">
+        ${agentAnomaliesHTML(data)}
+        ${agentAnalysisHTML()}
+        ${agentTreasuryHTML(data)}
+        ${agentReportHTML(data)}
+        ${agentChatHTML()}
+      </div>
+      <div class="agent-column agent-column-side">
+        ${agentDueItemsHTML(data)}
+        ${agentRecommendationsHTML(data)}
+      </div>
+    </div>`;
+}
+
+/* ---------- Appels à l’API Claude ---------- */
+async function callClaudeAPI({ system, messages, maxTokens = 1400 }) {
+  const key = getAIKey();
+  if (!key) throw new Error('Aucune clé API enregistrée dans les paramètres.');
+  const headers = {
+    'content-type': 'application/json',
+    'x-api-key': key,
+    'anthropic-version': '2023-06-01',
+    'anthropic-dangerous-direct-browser-access': 'true'
+  };
+  const baseBody = { model: aiModel(), max_tokens: maxTokens, system, messages };
+  const send = async body => {
+    let response;
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+      });
+    } catch (error) {
+      throw new Error('Connexion à Anthropic impossible. Vérifiez votre accès internet.');
+    }
+    let payload = null;
+    try { payload = await response.json(); } catch (error) { payload = null; }
+    return { response, payload };
+  };
+
+  // Les modèles récents activent un raisonnement interne qui consomme le budget de tokens :
+  // on le désactive quand c’est possible, avec repli pour les modèles qui refusent ce réglage.
+  let { response, payload } = await send({ ...baseBody, thinking: { type: 'disabled' } });
+  if (!response.ok && response.status === 400 && /thinking/i.test(String(payload?.error?.message || ''))) {
+    ({ response, payload } = await send(baseBody));
+  }
+
+  if (!response.ok) {
+    if (response.status === 401) throw new Error('Clé API refusée. Vérifiez la clé dans les paramètres.');
+    if (response.status === 404) throw new Error('Modèle indisponible. Choisissez un autre modèle dans les paramètres.');
+    if (response.status === 429) throw new Error('Trop de requêtes pour le moment. Réessayez dans quelques secondes.');
+    if (response.status === 529) throw new Error('Le service Anthropic est surchargé. Réessayez dans un instant.');
+    throw new Error(payload?.error?.message || `Erreur ${response.status} de l’API Anthropic.`);
+  }
+  const blocks = Array.isArray(payload?.content) ? payload.content : [];
+  const text = blocks.filter(block => block.type === 'text').map(block => block.text).join('\n').trim();
+  if (!text) throw new Error('Réponse vide du modèle. Réessayez.');
+  return text;
+}
+
+async function fetchAIModels() {
+  const key = getAIKey();
+  if (!key) throw new Error('Aucune clé API enregistrée.');
+  let response;
+  try {
+    response = await fetch('https://api.anthropic.com/v1/models?limit=100', {
+      headers: {
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      }
+    });
+  } catch (error) {
+    throw new Error('Connexion à Anthropic impossible. Vérifiez votre accès internet.');
+  }
+  if (response.status === 401) throw new Error('Clé API refusée par Anthropic.');
+  if (!response.ok) throw new Error(`Erreur ${response.status} lors du chargement des modèles.`);
+  const payload = await response.json().catch(() => null);
+  const data = Array.isArray(payload?.data) ? payload.data : [];
+  const priority = { haiku: 0, sonnet: 1, opus: 2 };
+  return data
+    .map(model => ({ id: model.id, label: model.display_name || model.id, line: model.line || '' }))
+    .sort((a, b) => (priority[a.line] ?? 3) - (priority[b.line] ?? 3) || a.label.localeCompare(b.label));
+}
+
+function currentAIModelOptions() {
+  const models = agentState.models && agentState.models.length ? agentState.models : AI_MODELS_FALLBACK;
+  const known = models.some(model => model.id === aiModel());
+  const options = known ? models : [{ id: aiModel(), label: aiModelLabel() }, ...models];
+  return options.map(model => `<option value="${escapeHTML(model.id)}" ${model.id === aiModel() ? 'selected' : ''}>${escapeHTML(model.label)}</option>`).join('');
+}
+
+function aiToggleRowHTML() {
+  return `
+    <div class="preference-row">
+      <div class="preference-copy"><strong>Activer l’assistant IA</strong><small>Analyse rédigée, rapport IA et lecture intelligente des reçus par Claude.</small></div>
+      <label class="switch">
+        <input type="checkbox" data-ai-toggle ${state.ai?.enabled ? 'checked' : ''}>
+        <span class="switch-track"></span>
+      </label>
+    </div>`;
+}
+
+function saveAIKeyFromSettings() {
+  const input = $('#aiKeyInput');
+  if (!input) return;
+  const value = String(input.value || '').trim();
+  if (!value) {
+    showToast('Aucune clé saisie', 'Collez votre clé API Anthropic puis réessayez.', 'error');
+    return;
+  }
+  if (!/^sk-ant[\w-]{12,}/.test(value)) {
+    showToast('Clé suspecte', 'Une clé Anthropic commence par « sk-ant- ». Vérifiez votre copie.', 'error');
+    return;
+  }
+  if (!setAIKey(value)) {
+    showToast('Enregistrement impossible', 'Le stockage du navigateur est indisponible.', 'error');
+    return;
+  }
+  if (!state.ai.enabled) {
+    state.ai.enabled = true;
+    saveState(true);
+  }
+  renderSettings();
+  showToast('Clé enregistrée', 'Elle reste stockée uniquement sur cet appareil. Vous pouvez tester la connexion.');
+}
+
+function clearAIKey() {
+  setAIKey('');
+  renderSettings();
+  showToast('Clé retirée', 'L’assistant repasse en analyse locale, 100 % dans votre navigateur.');
+}
+
+async function testAIConnection() {
+  if (!getAIKey()) {
+    showToast('Clé manquante', 'Enregistrez d’abord votre clé API Anthropic.', 'error');
+    return;
+  }
+  try {
+    agentState.models = await fetchAIModels();
+    saveState(true);
+    renderSettings();
+    showToast('Connexion réussie', `${agentState.models.length} modèles disponibles · prêt à analyser.`);
+  } catch (error) {
+    showToast('Connexion impossible', error.message, 'error');
+  }
+}
+
+async function loadAIModelsFromSettings() {
+  try {
+    if (!getAIKey()) throw new Error('Enregistrez d’abord votre clé API.');
+    agentState.models = await fetchAIModels();
+    renderSettings();
+    showToast('Modèles chargés', `${agentState.models.length} modèles Anthropic disponibles.`);
+  } catch (error) {
+    showToast('Chargement impossible', error.message, 'error');
+  }
+}
+
+/* ---------- Actions de l’assistant ---------- */
+function agentSystemPrompt() {
+  return [
+    'Tu es Sika, l’assistant financier personnel d’un petit commerce de proximité en Afrique de l’Ouest (zone FCFA).',
+    'Tu t’adresses à une commerçante qui n’est pas comptable : langage simple, phrases courtes, ton bienveillant et concret.',
+    'Tu réponds toujours en français et tu utilises le FCFA.',
+    'Tu cites uniquement les chiffres présents dans les données fournies : tu n’inventes jamais de montants.',
+    'Tu es prudent : tu privilégies la trésorerie, la régularité et la réduction des risques.',
+    'Quand une information manque pour conclure, tu le dis et tu indiques précisément quoi compléter.',
+    'Tu termines tes analyses par une courte liste d’actions concrètes à faire cette semaine.'
+  ].join(' ');
+}
+
+function buildFinanceContext() {
+  const period = getPeriodData('month');
+  const months = getMonthlySeries(6);
+  const forecast = forecastTreasury(45);
+  const readiness = getReadiness();
+  const totals = dueItemTotals();
+  const anomalies = detectAnomalies();
+  const expenses = getBreakdown(period.current.transactions, 'expense');
+  const missing = getMissingInfoList();
+  const fmt = value => `${formatNumber(Math.round(value))} ${CURRENCY}`;
+  const dueLine = item => `${item.party} ${fmt(item.amount)} (échéance ${formatDate(item.dueDate)}${item.overdue ? ', EN RETARD' : ''})`;
+  return [
+    `Commerce : ${state.profile.business}, géré par ${state.profile.owner} à ${state.profile.city} (${state.profile.country}).`,
+    `Date du jour : ${todayLongLabel()}. Devise : FCFA.`,
+    '',
+    `MOIS EN COURS (${period.label}) : ventes ${fmt(period.current.income)}, dépenses ${fmt(period.current.expense)}, résultat ${fmt(period.current.net)}.`,
+    `MOIS PRÉCÉDENT : ventes ${fmt(period.previous.income)}, dépenses ${fmt(period.previous.expense)}, résultat ${fmt(period.previous.net)}.`,
+    `6 DERNIERS MOIS : ${months.map(month => `${month.label} : ventes ${formatNumber(month.income)}, dépenses ${formatNumber(month.expense)}, résultat ${formatNumber(month.net)}`).join(' ; ')}.`,
+    `TRÉSORERIE ESTIMÉE : ${fmt(getTreasuryNow())}. Résultat net moyen des 28 derniers jours : ${fmt(forecast.netDaily)} par jour.`,
+    `PRÉVISION À 45 JOURS : solde le plus bas estimé ${fmt(forecast.lowest.balance)} autour du ${formatDate(forecast.lowest.date)}${forecast.lowest.balance < 0 ? ` — besoin de trésorerie d’environ ${fmt(Math.abs(forecast.lowest.balance))}` : ' (pas de tension prévue)'}.`,
+    `DETTES À PAYER : ${totals.debts.length ? totals.debts.map(dueLine).join(' ; ') : 'aucune'}.`,
+    `CRÉANCES À RECEVOIR : ${totals.receivables.length ? totals.receivables.map(dueLine).join(' ; ') : 'aucune'}.`,
+    `DÉPENSES DU MOIS PAR CATÉGORIE : ${expenses.length ? expenses.slice(0, 6).map(entry => `${entry.category} ${formatNumber(entry.amount)} (${Math.round(entry.share)} %)`).join(' ; ') : 'aucune'}.`,
+    `JUSTIFICATIFS : ${state.documents.length} documents scannés au total sur ${state.transactions.length} opérations. Informations manquantes : ${missing.length ? missing.join(' ; ') : 'aucune'}.`,
+    `SCORE DE PRÉPARATION AU FINANCEMENT : ${readiness.score}/100 (${readiness.label}).`,
+    `ANOMALIES DÉTECTÉES AUTOMATIQUEMENT : ${anomalies.length ? anomalies.map(anomaly => `${anomaly.title} — ${anomaly.detail}`).join(' | ') : 'aucune'}.`
+  ].join('\n');
+}
+
+async function runAgentAnalysis() {
+  if (agentState.busy) return;
+  if (!aiEnabled()) {
+    showToast('Assistant IA non connecté', 'Activez l’IA dans les paramètres pour une analyse rédigée par Claude.', 'error');
+    navigateTo('settings');
+    return;
+  }
+  agentState.busy = 'analysis';
+  renderAssistant();
+  try {
+    const context = buildFinanceContext();
+    const text = await callClaudeAPI({
+      system: agentSystemPrompt(),
+      messages: [{
+        role: 'user',
+        content: `Voici la situation actuelle de mon commerce :\n\n${context}\n\nAnalyse cette situation en profondeur :\n1. Points forts de l’activité.\n2. Risques financiers classés par gravité (trésorerie, dettes, créances, dépenses).\n3. Erreurs ou anomalies possibles dans mes saisies.\n4. Échéances sensibles des prochaines semaines.\n5. Trois recommandations concrètes et chiffrées pour améliorer ma rentabilité.\nTermine par « À faire cette semaine » avec 2 ou 3 actions très simples.`
+      }],
+      maxTokens: 1600
+    });
+    agentState.analysis = text;
+    agentState.analysisAt = new Date();
+    showToast('Analyse terminée', 'Sika a analysé vos finances et listé ses recommandations.');
+  } catch (error) {
+    showToast('Analyse impossible', error.message, 'error');
+  } finally {
+    agentState.busy = '';
+    renderAssistant();
+  }
+}
+
+async function runAgentReport() {
+  if (agentState.busy) return;
+  if (!aiEnabled()) {
+    showToast('Assistant IA non connecté', 'Le rapport local est déjà disponible ci-dessous. Activez l’IA pour une rédaction enrichie.', 'error');
+    return;
+  }
+  agentState.busy = 'report';
+  renderAssistant();
+  try {
+    const context = buildFinanceContext();
+    const text = await callClaudeAPI({
+      system: agentSystemPrompt(),
+      messages: [{
+        role: 'user',
+        content: `Voici la situation actuelle de mon commerce :\n\n${context}\n\nRédige mon rapport financier actualisé, prêt à présenter à une banque ou un organisme de financement (maximum 600 mots). Structure :\n1. Situation de l’activité ce mois.\n2. Points de vigilance.\n3. Trésorerie prévisionnelle et échéances.\n4. Ce qui manque encore dans mon dossier.\n5. Conseils pour renforcer la demande de financement.\nUtilise un ton confiant mais honnête, cite mes chiffres, et conclus par la préparation du dossier.`
+      }],
+      maxTokens: 1800
+    });
+    agentState.report = text;
+    agentState.reportAt = new Date();
+    showToast('Rapport rédigé', 'Votre rapport financier IA est prêt : relisez, copiez ou imprimez-le.');
+  } catch (error) {
+    showToast('Rédaction impossible', error.message, 'error');
+  } finally {
+    agentState.busy = '';
+    renderAssistant();
+  }
+}
+
+async function askAgent() {
+  if (agentState.busy) return;
+  const input = $('#agentQuestionInput');
+  const question = String(input?.value || '').trim();
+  if (!question) return;
+  if (!aiEnabled()) {
+    showToast('Assistant IA non connecté', 'Ajoutez votre clé API dans les paramètres pour discuter avec Sika.', 'error');
+    return;
+  }
+  agentState.chat.push({ role: 'user', content: question });
+  agentState.busy = 'chat';
+  renderAssistant();
+  try {
+    const context = buildFinanceContext();
+    const history = agentState.chat.slice(-10).map(message => ({ role: message.role, content: message.content }));
+    const reply = await callClaudeAPI({
+      system: agentSystemPrompt(),
+      messages: [
+        { role: 'user', content: `Voici la situation actuelle de mon commerce :\n\n${context}\n\nRéponds simplement « Compris », sans commentaire.` },
+        { role: 'assistant', content: 'Compris. Posez votre question.' },
+        ...history
+      ],
+      maxTokens: 900
+    });
+    agentState.chat.push({ role: 'assistant', content: reply });
+  } catch (error) {
+    agentState.chat.push({ role: 'assistant', content: `Je n’ai pas pu répondre : ${error.message}` });
+  } finally {
+    agentState.chat = agentState.chat.slice(-12);
+    agentState.busy = '';
+    renderAssistant();
+    const chatBox = $('#agentChat');
+    if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
+    $('#agentQuestionInput')?.focus();
+  }
+}
+
+/* ---------- Rapport : copie et impression ---------- */
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (error) {
+    try {
+      const area = document.createElement('textarea');
+      area.value = text;
+      area.setAttribute('readonly', '');
+      area.style.position = 'fixed';
+      area.style.opacity = '0';
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand('copy');
+      area.remove();
+      return ok;
+    } catch (innerError) {
+      return false;
+    }
+  }
+}
+
+async function copyAgentReport() {
+  const text = agentState.report || agentReportText();
+  const done = await copyTextToClipboard(text);
+  if (done) showToast('Rapport copié', 'Collez-le dans un email, WhatsApp ou un document Word.');
+  else showToast('Copie impossible', 'Sélectionnez le texte du rapport et copiez-le manuellement.', 'error');
+}
+
+function agentReportPrintHTML() {
+  const data = buildAgentReportData();
+  const text = agentReportText(data);
+  const aiText = agentState.report || '';
+  return `
+    <article class="print-page agent-print">
+      <header class="agent-print-head">
+        <div>
+          <p class="agent-print-brand">sika.</p>
+          <h1>Rapport financier</h1>
+          <p>${escapeHTML(state.profile.business)} · ${escapeHTML(state.profile.owner)} · ${escapeHTML([state.profile.city, state.profile.country].filter(Boolean).join(', '))}</p>
+        </div>
+        <div class="agent-print-meta">
+          <p>Édité le ${todayLongLabel()}</p>
+          <p>Montants en ${CURRENCY}</p>
+        </div>
+      </header>
+      <pre class="agent-print-text">${escapeHTML(text)}</pre>
+      ${aiText ? `<h2 class="agent-print-sub">Lecture de l’assistant IA (${escapeHTML(aiModelLabel())})</h2><pre class="agent-print-text">${escapeHTML(aiText)}</pre>` : ''}
+      <footer class="agent-print-foot">Rapport généré localement par Sika — document de travail à remettre à votre banque ou organisme de financement.</footer>
+    </article>`;
+}
+
+function printAgentReport() {
+  launchPrint(agentReportPrintHTML());
+}
+
 /* ---------- Paramètres ---------- */
 function preferenceRowHTML(key, title, description, checked) {
   return `
@@ -3313,6 +4637,35 @@ function renderSettings() {
             ${preferenceRowHTML('aiInsights', 'Analyses et conseils', 'Afficher l’œil de Sika et les recommandations personnalisées.', state.preferences.aiInsights)}
           </div>
           <div class="settings-note">${icon('sparkles')} L’extraction et l’analyse fonctionnent directement dans votre navigateur, sans compte à créer.</div>
+        </section>
+
+        <section class="card settings-card">
+          <div class="settings-card-head">
+            <span class="settings-head-icon">${icon('bot')}</span>
+            <div><h2>Assistant IA (Claude)</h2><p>Connectez votre clé Anthropic pour des analyses, un rapport rédigé et la lecture intelligente des reçus.</p></div>
+          </div>
+          <div class="preference-list">
+            ${aiToggleRowHTML()}
+          </div>
+          <div class="settings-form">
+            <div class="form-grid">
+              <label class="field field-span-2">
+                <span>Clé API Anthropic <small>(${getAIKey() ? 'une clé est enregistrée sur cet appareil' : 'jamais publiée ni partagée'})</small></span>
+                <input type="password" id="aiKeyInput" placeholder="${getAIKey() ? 'Clé enregistrée — collez-en une nouvelle pour la remplacer' : 'sk-ant-…'}" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="field field-span-2">
+                <span>Modèle utilisé</span>
+                <select id="aiModelSelect">${currentAIModelOptions()}</select>
+              </label>
+            </div>
+            <div class="settings-actions settings-actions-wrap">
+              <button type="button" class="btn btn-secondary" data-action="test-ai">${icon('check-circle', 'icon-sm')} Tester la connexion</button>
+              <button type="button" class="btn btn-secondary" data-action="load-ai-models">${icon('refresh', 'icon-sm')} Charger les modèles</button>
+              <button type="button" class="btn btn-primary" data-action="save-ai-key">${icon('check', 'icon-sm')} Enregistrer la clé</button>
+              ${getAIKey() ? `<button type="button" class="btn btn-danger-ghost" data-action="clear-ai-key">${icon('trash', 'icon-sm')} Retirer la clé</button>` : ''}
+            </div>
+          </div>
+          <div class="settings-note">${icon('shield')} Votre clé reste dans le stockage local de ce navigateur : elle ne part jamais sur un serveur tiers autre qu’Anthropic, et n’est pas incluse dans vos exports. Sans clé, l’assistant utilise le moteur d’analyse local, 100 % hors ligne.</div>
         </section>
       </div>
 
@@ -3730,6 +5083,47 @@ function handleGlobalClick(event) {
       case 'reset-data':
         resetAppData();
         break;
+      case 'view':
+        navigateTo(actionTarget.dataset.view || 'overview');
+        break;
+      case 'add-due':
+        openDueDialog(null, actionTarget.dataset.kind);
+        break;
+      case 'edit-due': {
+        const dueItem = allDueItems().find(entry => entry.id === id);
+        if (dueItem) openDueDialog(dueItem);
+        break;
+      }
+      case 'settle-due':
+        settleDueItem(id);
+        break;
+      case 'delete-due':
+        deleteDueFromDialog();
+        break;
+      case 'save-ai-key':
+        saveAIKeyFromSettings();
+        break;
+      case 'clear-ai-key':
+        clearAIKey();
+        break;
+      case 'test-ai':
+        testAIConnection();
+        break;
+      case 'load-ai-models':
+        loadAIModelsFromSettings();
+        break;
+      case 'run-agent-analysis':
+        runAgentAnalysis();
+        break;
+      case 'run-agent-report':
+        runAgentReport();
+        break;
+      case 'copy-agent-report':
+        copyAgentReport();
+        break;
+      case 'print-agent-report':
+        printAgentReport();
+        break;
       default:
         break;
     }
@@ -3762,6 +5156,25 @@ function handleGlobalChange(event) {
     }
     return;
   }
+  if (target.matches('[data-ai-toggle]')) {
+    state.ai.enabled = target.checked;
+    saveState(true);
+    if (target.checked && !getAIKey()) {
+      showToast('IA activée', 'Il ne manque plus que votre clé API Anthropic pour l’utiliser.', 'info');
+    } else if (target.checked) {
+      showToast('Assistant IA activé', 'Analyses, rapport et lecture des reçus par Claude sont disponibles.');
+    } else {
+      showToast('Assistant IA désactivé', 'Sika repasse en analyse locale, 100 % dans votre navigateur.');
+    }
+    renderSettings();
+    return;
+  }
+  if (target.id === 'aiModelSelect') {
+    state.ai.model = String(target.value || DEFAULT_AI_MODEL);
+    saveState(true);
+    showToast('Modèle mis à jour', `Les prochaines analyses utiliseront ${aiModelLabel()}.`);
+    return;
+  }
   if (target.matches('[data-checklist-key]') && target.dataset.checklistKey) {
     state.checklist[target.dataset.checklistKey] = target.checked;
     saveState(true);
@@ -3778,6 +5191,12 @@ function handleGlobalSubmit(event) {
   if (formId === 'transactionForm') {
     event.preventDefault();
     saveTransactionForm();
+  } else if (formId === 'debtForm') {
+    event.preventDefault();
+    saveDueForm();
+  } else if (formId === 'agentAskForm') {
+    event.preventDefault();
+    askAgent();
   } else if (formId === 'scanForm') {
     event.preventDefault();
     saveScannedTransaction();

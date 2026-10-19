@@ -65,6 +65,8 @@
     <symbol id="i-log-out" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></symbol>
     <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
     <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M11 18l-6-6 6-6"/></symbol>
+    <symbol id="i-bot" viewBox="0 0 24 24"><rect x="4" y="9" width="16" height="11" rx="3"/><path d="M12 9V6"/><circle cx="12" cy="4" r="1.6"/><path d="M9 13.5h.01M15 13.5h.01M9.5 17h5"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="m21 3-9.5 9.5M21 3l-6.5 18-3-8.5L3 9.5Z"/></symbol>
   </svg>
 
   <div class="app-shell">
@@ -94,6 +96,11 @@
         <button class="nav-item" data-view="overview">
           <svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg>
           <span>Vue d’ensemble</span>
+        </button>
+        <button class="nav-item" data-view="assistant">
+          <svg class="icon" aria-hidden="true"><use href="#i-bot"/></svg>
+          <span>Assistant IA</span>
+          <span class="nav-new">IA</span>
         </button>
         <button class="nav-item" data-view="transactions">
           <svg class="icon" aria-hidden="true"><use href="#i-receipt"/></svg>
@@ -192,6 +199,7 @@
 
       <main class="main-content" id="mainContent">
         <section class="page" data-page="overview" aria-labelledby="overviewTitle"></section>
+        <section class="page" data-page="assistant" aria-labelledby="assistantTitle"></section>
         <section class="page" data-page="transactions" aria-labelledby="transactionsTitle"></section>
         <section class="page" data-page="documents" aria-labelledby="documentsTitle"></section>
         <section class="page" data-page="scanner" aria-labelledby="scannerTitle"></section>
@@ -211,8 +219,8 @@
           <span><svg class="icon" aria-hidden="true"><use href="#i-scan"/></svg></span>
           <small>Scanner</small>
         </button>
-        <button class="mobile-nav-item" data-view="report">
-          <svg class="icon" aria-hidden="true"><use href="#i-chart"/></svg><span>Rapports</span>
+        <button class="mobile-nav-item" data-view="assistant">
+          <svg class="icon" aria-hidden="true"><use href="#i-bot"/></svg><span>Assistant</span>
         </button>
         <button class="mobile-nav-item" data-view="financing">
           <svg class="icon" aria-hidden="true"><use href="#i-bank"/></svg><span>Dossier</span>
@@ -311,6 +319,75 @@
     </div>
   </dialog>
 
+  <dialog class="modal" id="debtDialog" aria-labelledby="debtDialogTitle">
+    <div class="modal-shell">
+      <div class="modal-head">
+        <div>
+          <p class="modal-eyebrow" id="debtDialogEyebrow">Nouvelle échéance</p>
+          <h2 id="debtDialogTitle">Ajouter une dette</h2>
+        </div>
+        <button type="button" class="icon-button" data-close-dialog="debtDialog" aria-label="Fermer">
+          <svg class="icon" aria-hidden="true"><use href="#i-x"/></svg>
+        </button>
+      </div>
+      <form id="debtForm" novalidate>
+        <input type="hidden" id="debtId" name="debt-id">
+        <div class="modal-body">
+          <div class="type-toggle" role="group" aria-label="Type d’échéance">
+            <label class="type-option">
+              <input type="radio" name="debt-kind" value="debt" id="debtKindDebt" checked>
+              <span class="type-option-inner">
+                <span class="type-icon expense"><svg class="icon" aria-hidden="true"><use href="#i-arrow-up-right"/></svg></span>
+                <span><strong>À payer</strong><small>Fournisseur, loyer…</small></span>
+              </span>
+            </label>
+            <label class="type-option">
+              <input type="radio" name="debt-kind" value="receivable" id="debtKindReceivable">
+              <span class="type-option-inner">
+                <span class="type-icon income"><svg class="icon" aria-hidden="true"><use href="#i-arrow-down-left"/></svg></span>
+                <span><strong>À recevoir</strong><small>Client, ardoise…</small></span>
+              </span>
+            </label>
+          </div>
+          <div class="form-grid">
+            <label class="field">
+              <span>Montant <em>*</em></span>
+              <span class="input-suffix">
+                <input type="number" name="debt-amount" id="debtAmount" placeholder="0" min="1" step="1" required inputmode="numeric">
+                <span>FCFA</span>
+              </span>
+            </label>
+            <label class="field">
+              <span>Échéance <em>*</em></span>
+              <input type="date" name="debt-due-date" id="debtDueDate" required>
+            </label>
+            <label class="field field-span-2">
+              <span>Personne ou entreprise <em>*</em></span>
+              <input type="text" name="debt-party" id="debtParty" placeholder="Ex. Grossiste Adjamé, Restaurant Le Baobab…" required maxlength="80" autocomplete="off">
+            </label>
+            <label class="field field-span-2">
+              <span>Objet <small>(facultatif)</small></span>
+              <input type="text" name="debt-label" id="debtLabel" placeholder="Ex. Solde marchandises, loyer du mois…" maxlength="80" autocomplete="off">
+            </label>
+            <label class="field field-span-2">
+              <span>Note <small>(facultatif)</small></span>
+              <textarea name="debt-note" id="debtNote" rows="2" placeholder="Un détail à retenir (accord de paiement, contact…)" maxlength="240"></textarea>
+            </label>
+          </div>
+          <p class="form-error" id="debtFormError" role="alert" hidden></p>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn btn-danger-ghost" id="debtDeleteButton" data-action="delete-due" hidden>
+            <svg class="icon icon-sm" aria-hidden="true"><use href="#i-trash"/></svg> Supprimer
+          </button>
+          <span class="modal-foot-spacer"></span>
+          <button type="button" class="btn btn-secondary" data-close-dialog="debtDialog">Annuler</button>
+          <button type="submit" class="btn btn-primary" id="debtSubmitButton">Ajouter l’échéance</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
   <dialog class="modal modal-wide" id="documentDialog" aria-labelledby="documentDialogTitle">
     <div class="modal-shell">
       <div class="modal-head">
@@ -344,6 +421,6 @@
   <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="false"></div>
   <div class="print-area" id="printArea" aria-hidden="true"></div>
 
-  <script src="app.js?v=1.0.0"></script>
+  <script src="app.js?v=1.1.0"></script>
 </body>
 </html>
